@@ -1,0 +1,1 @@
+export type SpielTemplate={id:string;name:string;spiel:string;active:boolean};

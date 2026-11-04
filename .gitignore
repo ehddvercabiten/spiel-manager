@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+.env.production
+*.log
+
+# Runtime security/session state (keep private)
+data/admin-login-attempts.json
+data/sessions/
