@@ -8,6 +8,9 @@ dist/
 data/admin-login-attempts.json
 data/sessions/
 
+# Cloudflare Wrangler local state and build cache
+.wrangler/
+
 .dev.vars
 .wrangler/
 migrations/0002_import_existing_templates.sql
