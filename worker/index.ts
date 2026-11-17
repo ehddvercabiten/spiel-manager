@@ -9,9 +9,9 @@ interface Env {
 }
 const USER_COOKIE="spiel_user_session";
 const ADMIN_COOKIE="spiel_admin_session";
-const FREE_COPY_LIMIT=300;
+const DEFAULT_FREE_COPY_LIMIT=300;
 const PLAN_PRICE=49;
-const PLAN_DAYS=30;
+const PLAN_DAYS=60;
 const SESSION_SECONDS=60*60*24*30;
 const json=(data:unknown,status=200,headers:HeadersInit={})=>new Response(JSON.stringify(data),{status,headers:{"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store",...headers}});
 const err=(message:string,status=400)=>json({error:message},status);
@@ -27,7 +27,15 @@ async function userId(req:Request,env:Env):Promise<string|null>{
  const row=await env.DB.prepare("SELECT user_id FROM user_sessions WHERE token_hash=? AND expires_at>?").bind(await hash(token),nowSec()).first<{user_id:string}>();
  return row?.user_id||null;
 }
-async function adminOk(req:Request,env:Env){const token=cookie(req,ADMIN_COOKIE);if(!token)return false;return !!await env.DB.prepare("SELECT token_hash FROM admin_sessions WHERE token_hash=? AND expires_at>?").bind(await hash(token),nowSec()).first();}
+async function adminOk(req:Request,env:Env){const token=cookie(req,ADMIN_COOKIE);if(!token)return false;return !!await env.DB.prepare("SELECT token_hash FROM admin_sessions WHERE token_hash=? AND expires_at>? AND mfa_verified=1").bind(await hash(token),nowSec()).first();}
+async function adminPending(req:Request,env:Env){const token=cookie(req,ADMIN_COOKIE);if(!token)return false;return !!await env.DB.prepare("SELECT token_hash FROM admin_sessions WHERE token_hash=? AND expires_at>? AND mfa_verified=0").bind(await hash(token),nowSec()).first();}
+async function getSetting(env:Env,key:string,fallback:string){const row=await env.DB.prepare("SELECT value FROM app_settings WHERE key=?").bind(key).first<{value:string}>();return row?.value??fallback;}
+async function freeCopyLimit(env:Env){const n=Number(await getSetting(env,"free_copy_limit",String(DEFAULT_FREE_COPY_LIMIT)));return Number.isInteger(n)&&n>=1&&n<=100000?n:DEFAULT_FREE_COPY_LIMIT;}
+function base32(bytes:Uint8Array){const alphabet="ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";let bits=0,value=0,out="";for(const byte of bytes){value=(value<<8)|byte;bits+=8;while(bits>=5){out+=alphabet[(value>>>(bits-5))&31];bits-=5;}}if(bits)out+=alphabet[(value<<(5-bits))&31];return out;}
+function unbase32(input:string){const alphabet="ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";let bits=0,value=0,out:number[]=[];for(const c of input.replace(/=+$/,'').toUpperCase()){const idx=alphabet.indexOf(c);if(idx<0)throw new Error('Invalid authenticator secret');value=(value<<5)|idx;bits+=5;if(bits>=8){out.push((value>>>(bits-8))&255);bits-=8;}}return new Uint8Array(out);}
+async function totp(secret:string,at=Date.now()){const key=await crypto.subtle.importKey('raw',unbase32(secret),{name:'HMAC',hash:'SHA-1'},false,['sign']);const counter=Math.floor(at/30000);const msg=new Uint8Array(8);let n=counter;for(let i=7;i>=0;i--){msg[i]=n&255;n=Math.floor(n/256);}const mac=new Uint8Array(await crypto.subtle.sign('HMAC',key,msg));const offset=mac[mac.length-1]&15;const bin=((mac[offset]&127)<<24)|(mac[offset+1]<<16)|(mac[offset+2]<<8)|mac[offset+3];return String(bin%1000000).padStart(6,'0');}
+async function verifyTotp(secret:string,code:string){if(!/^\d{6}$/.test(code))return false;const now=Date.now();for(const drift of [-30000,0,30000])if(await totp(secret,now+drift)===code)return true;return false;}
+
 async function createSession(env:Env,table:"user_sessions"|"admin_sessions",ownerColumn:"user_id"|null,owner:string|null){
  const token=crypto.randomUUID()+crypto.randomUUID().replaceAll("-","");
  const tokenHash=await hash(token),now=nowSec(),expires=now+SESSION_SECONDS;
@@ -36,6 +44,7 @@ async function createSession(env:Env,table:"user_sessions"|"admin_sessions",owne
  return token;
 }
 async function usage(env:Env,id:string){
+ const FREE_COPY_LIMIT=await freeCopyLimit(env);
  const row=await env.DB.prepare("SELECT copies FROM copy_usage WHERE user_id=? AND period=?").bind(id,monthKey()).first<{copies:number}>();
  const sub=await env.DB.prepare("SELECT expires_at FROM subscriptions WHERE user_id=? AND status='ACTIVE' ORDER BY expires_at DESC LIMIT 1").bind(id).first<{expires_at:number}>();
  const premium=!!sub&&sub.expires_at>nowSec();
@@ -97,14 +106,14 @@ async function api(req:Request,env:Env):Promise<Response>{
  if(p==="/api/usage/copy"&&m==="POST"){
   const id=await userId(req,env);if(!id)return err("Sign in is required before copying.",401);
   const current=await usage(env,id);
-  if(current.plan!=="PREMIUM"&&current.copiesUsed>=FREE_COPY_LIMIT)return json({error:"You have reached your 300-copy monthly free limit. Upgrade to Premium to continue.",usage:current},402);
+  if(current.plan!=="PREMIUM"&&current.copiesUsed>=current.copyLimit!)return json({error:"You have reached your monthly free copy limit. Upgrade to Premium to continue.",usage:current},402);
   const period=monthKey();
   // Atomic monthly increment prevents simultaneous requests from exceeding the free allowance.
   if(current.plan==="PREMIUM"){
    await env.DB.prepare("INSERT INTO copy_usage(user_id,period,copies) VALUES(?,?,1) ON CONFLICT(user_id,period) DO UPDATE SET copies=copies+1").bind(id,period).run();
   }else{
-   const result=await env.DB.prepare("INSERT INTO copy_usage(user_id,period,copies) VALUES(?,?,1) ON CONFLICT(user_id,period) DO UPDATE SET copies=copies+1 WHERE copies < ?").bind(id,period,FREE_COPY_LIMIT).run();
-   if(!result.meta.changes)return json({error:"You have reached your 300-copy monthly free limit. Upgrade to Premium to continue.",usage:await usage(env,id)},402);
+   const result=await env.DB.prepare("INSERT INTO copy_usage(user_id,period,copies) VALUES(?,?,1) ON CONFLICT(user_id,period) DO UPDATE SET copies=copies+1 WHERE copies < ?").bind(id,period,current.copyLimit).run();
+   if(!result.meta.changes)return json({error:"You have reached your monthly free copy limit. Upgrade to Premium to continue.",usage:await usage(env,id)},402);
   }
   return json({usage:await usage(env,id)});
  }
@@ -147,7 +156,40 @@ async function api(req:Request,env:Env):Promise<Response>{
   const pin=typeof b.pin==="string"?b.pin:"";
   if(!env.ADMIN_PIN_HASH||pin.length<8||pin.length>128||!(await bcrypt.compare(pin,env.ADMIN_PIN_HASH)))return err("Incorrect PIN.",401);
   const token=await createSession(env,"admin_sessions",null,null);
-  return json({authenticated:true},200,{"Set-Cookie":setCookie(ADMIN_COOKIE,token,SESSION_SECONDS)});
+  const mfa=await env.DB.prepare("SELECT totp_secret FROM admin_security WHERE id=1").first<{totp_secret:string}>();
+  return json({authenticated:false,requiresTotp:!!mfa?.totp_secret,requiresSetup:!mfa?.totp_secret},200,{"Set-Cookie":setCookie(ADMIN_COOKIE,token,SESSION_SECONDS)});
+ }
+ if(p==="/api/admin/mfa/setup"&&m==="POST"){
+  if(!await adminPending(req,env))return err("Enter the administrator PIN first.",401);
+  const existing=await env.DB.prepare("SELECT totp_secret FROM admin_security WHERE id=1").first<{totp_secret:string}>();
+  if(existing?.totp_secret)return err("Authenticator is already configured. Sign in with your authenticator code.",409);
+  const secret=base32(crypto.getRandomValues(new Uint8Array(20)));
+  await env.DB.prepare("INSERT INTO admin_security(id,pending_secret,updated_at) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET pending_secret=excluded.pending_secret,updated_at=excluded.updated_at").bind(secret,nowSec()).run();
+  const issuer="Spiel%20Manager",account="Administrator";
+  return json({secret,otpauthUrl:`otpauth://totp/${issuer}:${account}?secret=${secret}&issuer=${issuer}&algorithm=SHA1&digits=6&period=30`});
+ }
+ if(p==="/api/admin/mfa/verify"&&m==="POST"){
+  if(!await adminPending(req,env))return err("Administrator PIN session is missing.",401);
+  let b:any;try{b=await req.json();}catch{return err("Invalid request body.");}
+  const record=await env.DB.prepare("SELECT totp_secret,pending_secret FROM admin_security WHERE id=1").first<any>();
+  const secret=record?.totp_secret||record?.pending_secret;
+  if(!secret||!(await verifyTotp(secret,String(b.code||''))))return err("Invalid authenticator code.",401);
+  if(!record.totp_secret)await env.DB.prepare("INSERT INTO admin_security(id,totp_secret,updated_at) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET totp_secret=excluded.totp_secret,pending_secret=NULL,updated_at=excluded.updated_at").bind(secret,nowSec()).run();
+  const token=cookie(req,ADMIN_COOKIE)!;
+  await env.DB.prepare("UPDATE admin_sessions SET mfa_verified=1 WHERE token_hash=? AND expires_at>?").bind(await hash(token),nowSec()).run();
+  return json({authenticated:true});
+ }
+ if(p==="/api/admin/settings"&&m==="GET"){
+  if(!await adminOk(req,env))return err("Administrator authentication required.",401);
+  return json({freeCopyLimit:await freeCopyLimit(env),premiumDays:PLAN_DAYS,price:PLAN_PRICE});
+ }
+ if(p==="/api/admin/settings"&&m==="PUT"){
+  if(!await adminOk(req,env))return err("Administrator authentication required.",401);
+  let b:any;try{b=await req.json();}catch{return err("Invalid request body.");}
+  const limit=Number(b.freeCopyLimit);
+  if(!Number.isInteger(limit)||limit<1||limit>100000)return err("Free copy limit must be a whole number between 1 and 100000.");
+  await env.DB.prepare("INSERT INTO app_settings(key,value,updated_at) VALUES('free_copy_limit',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").bind(String(limit),nowSec()).run();
+  return json({freeCopyLimit:limit,premiumDays:PLAN_DAYS,price:PLAN_PRICE});
  }
  if(p==="/api/admin/logout"&&m==="POST"){const t=cookie(req,ADMIN_COOKIE);if(t)await env.DB.prepare("DELETE FROM admin_sessions WHERE token_hash=?").bind(await hash(t)).run();return json({authenticated:false},200,{"Set-Cookie":clearCookie(ADMIN_COOKIE)});}
  if(p==="/api/admin/session"&&m==="GET")return await adminOk(req,env)?json({authenticated:true}):err("Administrator authentication required.",401);
@@ -179,7 +221,7 @@ async function api(req:Request,env:Env):Promise<Response>{
   }
   if(Number(row.amount)!==49)return err("Payment amount does not match the ₱49 plan.",409);
   const expiry=await env.DB.prepare("SELECT MAX(expires_at) AS expiry FROM subscriptions WHERE user_id=? AND status='ACTIVE'").bind(row.user_id).first<any>();
-  const start=Math.max(now,Number(expiry?.expiry||0)),expires=start+30*86400;
+  const start=Math.max(now,Number(expiry?.expiry||0)),expires=start+PLAN_DAYS*86400;
   const reviewed=await env.DB.prepare("UPDATE manual_payment_submissions SET status='APPROVED',reviewed_at=?,reviewed_by='admin' WHERE id=? AND status='PENDING'").bind(now,paymentId).run();
   if(!reviewed.meta.changes)return err("This payment has already been reviewed.",409);
   await env.DB.prepare("INSERT INTO subscriptions(id,user_id,plan,status,starts_at,expires_at,payment_reference,created_at) VALUES(?,?,'PREMIUM','ACTIVE',?,?,?,?)").bind(crypto.randomUUID(),row.user_id,start,expires,row.payment_reference,now).run();

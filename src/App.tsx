@@ -102,6 +102,13 @@ export default function App() {
   const [adminPin, setAdminPin] = useState("");
 
   const [adminUnlocked, setAdminUnlocked] = useState(false);
+  const [adminMfaStep, setAdminMfaStep] = useState<"pin"|"setup"|"verify">("pin");
+  const [totpSecret, setTotpSecret] = useState("");
+  const [totpCode, setTotpCode] = useState("");
+  const [freeLimit, setFreeLimit] = useState(300);
+  const [limitSaved, setLimitSaved] = useState("");
+  const [signedIn, setSignedIn] = useState(false);
+  const [limitModal, setLimitModal] = useState(false);
 
   const [adminTemplates, setAdminTemplates] = useState<Template[]>([]);
 
@@ -121,6 +128,10 @@ export default function App() {
   const selectedRegion = REGIONS.find(r => r.code === regionCode) ?? REGIONS[0];
 
 
+
+  useEffect(() => {
+    api<{user:{id:string}}>("/api/auth/me").then(()=>setSignedIn(true)).catch(()=>setSignedIn(false));
+  }, []);
 
   useEffect(() => {
 
@@ -317,8 +328,11 @@ export default function App() {
       setTimeCopyState(true);
       window.setTimeout(() => setTimeCopyState(false), 1800);
       setError("");
-    } catch {
-      setError("Clipboard access was blocked. Select and copy the displayed time manually.");
+    } catch (e) {
+      const message = (e as Error).message;
+      if (message.includes("300-copy") || message.includes("copy limit") || message.includes("free limit")) { setLimitModal(true); setTab("selection"); }
+      else if (message.toLowerCase().includes("sign in")) { setLimitModal(true); setTab("subscription"); }
+      else setError(message || "Clipboard access was blocked. Select and copy the displayed time manually.");
     }
   }
 
@@ -333,10 +347,11 @@ export default function App() {
 
       window.setTimeout(() => setCopyState(false), 1800);
 
-    } catch {
-
-      setError("Clipboard access was blocked. Select and copy the text manually.");
-
+    } catch (e) {
+      const message = (e as Error).message;
+      if (message.includes("300-copy") || message.includes("copy limit") || message.includes("free limit")) { setLimitModal(true); setTab("selection"); }
+      else if (message.toLowerCase().includes("sign in")) { setLimitModal(true); setTab("subscription"); }
+      else setError(message || "Clipboard access was blocked. Select and copy the text manually.");
     }
 
   }
@@ -402,31 +417,32 @@ export default function App() {
 
 
   async function unlock() {
-
     setError(""); setMessage("");
-
     try {
-
-      await api("/api/admin/login", { method: "POST", body: JSON.stringify({ pin: adminPin }) });
-
-      setAdminUnlocked(true);
-
+      const result = await api<{requiresTotp:boolean;requiresSetup:boolean}>("/api/admin/login", { method: "POST", body: JSON.stringify({ pin: adminPin }) });
       setAdminPin("");
-
-      await loadAdminTemplates();
-
-    } catch (e) {
-
-      setAdminPin("");
-
-      await goSelection();
-
-      setError((e as Error).message);
-
-    }
-
+      if (result.requiresSetup) {
+        const setup = await api<{secret:string;otpauthUrl:string}>("/api/admin/mfa/setup", {method:"POST"});
+        setTotpSecret(setup.secret); setAdminMfaStep("setup");
+      } else { setAdminMfaStep("verify"); }
+    } catch (e) { setAdminPin(""); setError((e as Error).message); }
   }
 
+  async function verifyAdminTotp() {
+    setError("");
+    try {
+      await api("/api/admin/mfa/verify", {method:"POST",body:JSON.stringify({code:totpCode})});
+      setTotpCode(""); setAdminUnlocked(true); setAdminMfaStep("pin");
+      await loadAdminTemplates();
+      const settings = await api<{freeCopyLimit:number}>("/api/admin/settings"); setFreeLimit(settings.freeCopyLimit);
+    } catch(e) { setError((e as Error).message); }
+  }
+
+  async function saveFreeLimit() {
+    setError("");setLimitSaved("");
+    try { const d=await api<{freeCopyLimit:number}>("/api/admin/settings",{method:"PUT",body:JSON.stringify({freeCopyLimit:freeLimit})});setFreeLimit(d.freeCopyLimit);setLimitSaved("Free monthly copy limit updated."); }
+    catch(e){setError((e as Error).message);}
+  }
 
 
   function clearForm() { setEditingId(null); setFormName(""); setFormSpiel(""); setFormActive(true); }
@@ -522,7 +538,8 @@ export default function App() {
       <button className={tab === "selection" ? "tab active" : "tab"} onClick={() => void goSelection()}><Clipboard size={16}/> Spiel Selection</button>
 
       <button className={tab === "management" ? "tab active" : "tab"} onClick={() => void openManagement()}><LockKeyhole size={16}/> Spiel Management <span className="lock-label">PIN PROTECTED</span></button>
-      <button className={tab === "subscription" ? "tab active" : "tab"} onClick={() => {setError("");setMessage("");setTab("subscription");}}>Premium</button>
+      {signedIn && <button className={tab === "subscription" ? "tab active" : "tab"} onClick={() => {setError("");setMessage("");setTab("subscription");}}>Premium</button>}
+      {!signedIn && <button className={tab === "subscription" ? "tab active" : "tab"} onClick={() => {setError("");setMessage("");setTab("subscription");}}>Sign in / Register</button>}
 
     </nav>
 
@@ -548,14 +565,15 @@ export default function App() {
 
     </main>}
 
-    {tab === "subscription" && <SubscriptionPanel />}
+    {tab === "subscription" && <SubscriptionPanel onAuthChange={setSignedIn} />}
 
     {tab === "management" && <main className="panel">
 
-      {!adminUnlocked ? <div className="login-card"><div className="secure-icon"><ShieldCheck size={26}/></div><div className="eyebrow">RESTRICTED AREA</div><h3>Administrator access</h3><p>Enter the administrator PIN to manage saved spiel templates.</p><form onSubmit={e => { e.preventDefault(); void unlock(); }}><input type="password" value={adminPin} onChange={e => setAdminPin(e.target.value)} placeholder="Administrator PIN" autoComplete="current-password" minLength={8}/><button className="primary full" disabled={adminPin.length < 8}>Unlock management</button></form></div>
+      {!adminUnlocked ? <div className="login-card"><div className="secure-icon"><ShieldCheck size={26}/></div><div className="eyebrow">RESTRICTED AREA</div><h3>Administrator access</h3>{adminMfaStep==="pin"?<><p>Enter the administrator PIN. Google Authenticator verification is required next.</p><form onSubmit={e => { e.preventDefault(); void unlock(); }}><input type="password" value={adminPin} onChange={e => setAdminPin(e.target.value)} placeholder="Administrator PIN" autoComplete="current-password" minLength={8}/><button className="primary full" disabled={adminPin.length < 8}>Continue</button></form></>:adminMfaStep==="setup"?<><p>Bind Google Authenticator. In the app, choose Enter a setup key and use this secret.</p><code className="totp-secret">{totpSecret}</code><p className="hint-inline">Account: Spiel Manager Administrator · Time-based · 6 digits</p><input inputMode="numeric" autoComplete="one-time-code" value={totpCode} onChange={e=>setTotpCode(e.target.value.replace(/\D/g,"").slice(0,6))} placeholder="6-digit authenticator code"/><button className="primary full" disabled={totpCode.length!==6} onClick={()=>void verifyAdminTotp()}>Verify and bind authenticator</button></>:<><p>Enter the current 6-digit code from Google Authenticator.</p><input inputMode="numeric" autoComplete="one-time-code" value={totpCode} onChange={e=>setTotpCode(e.target.value.replace(/\D/g,"").slice(0,6))} placeholder="6-digit authenticator code"/><button className="primary full" disabled={totpCode.length!==6} onClick={()=>void verifyAdminTotp()}>Verify and unlock</button></>}</div>
 
       : <><div className="panel-heading"><div><div className="eyebrow">ADMINISTRATION</div><h3>Manage saved spiels</h3></div><button className="quiet" onClick={() => void goSelection()}><LogOut size={16}/> Lock & exit</button></div>
 
+        <section className="admin-form limit-settings"><div className="eyebrow">USAGE CONTROLS</div><h3>Feature limits</h3><label>Free copies per user per calendar month<input type="number" min={1} max={100000} step={1} value={freeLimit} onChange={e=>setFreeLimit(Number(e.target.value))}/></label><p className="hint-inline">Premium duration: 60 days · Subscription price: ₱49 (fixed)</p><div className="form-actions"><button className="primary" onClick={()=>void saveFreeLimit()} disabled={!Number.isInteger(freeLimit)||freeLimit<1||freeLimit>100000}>Save limit</button>{limitSaved&&<span className="success-text">{limitSaved}</span>}</div></section>
         <AdminPayments />
 
         <div className="admin-form"><div className="field-grid"><label>Spiel name<input value={formName} onChange={e => setFormName(e.target.value)} placeholder="e.g. Coffeehouse - No Shot"/></label><label className="checkbox-field"><input type="checkbox" checked={formActive} onChange={e => setFormActive(e.target.checked)}/> Available to users</label></div><label>Spiel template <span className="hint-inline">Required placeholder: {"{{TIME}}"}</span><textarea value={formSpiel} onChange={e => setFormSpiel(e.target.value)} rows={5} placeholder="Called the coffeehouse at {{TIME}} to verify…"/></label><div className="form-actions"><button className="primary" onClick={() => void saveTemplate()} disabled={!formName.trim() || !formSpiel.includes("{{TIME}}") }><Plus size={16}/>{editingId ? "Save changes" : "Add spiel"}</button><button className="quiet" onClick={clearForm}>Clear</button></div></div>
@@ -566,6 +584,7 @@ export default function App() {
 
     </main>}
 
+    {limitModal && <div className="limit-modal-backdrop" role="presentation"><section className="limit-modal" role="dialog" aria-modal="true" aria-labelledby="limit-modal-title"><div className="secure-icon"><LockKeyhole size={24}/></div><h3 id="limit-modal-title">Your free copy limit has been reached</h3><p>{signedIn ? `You have used your ${freeLimit} free copies for this month.` : "Sign in or create an account to track your free copies and continue."} Subscribe for ₱49 to unlock Premium access for 60 days.</p><div className="form-actions"><button className="quiet" onClick={()=>setLimitModal(false)}>Close</button><button className="primary" onClick={()=>{setLimitModal(false);setTab("subscription");}}> {signedIn?"View Premium":"Sign in / Register"}</button></div></section></div>}
     <footer><p><strong>Time placeholder:</strong> {"{{TIME}}"} · Online time is retrieved independently for the selected region.</p></footer>
 
   </div>;

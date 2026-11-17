@@ -137,3 +137,26 @@ Replace `public/payment/gcash-qr-placeholder.png` with your authorized merchant 
 ### Important rollout checks
 
 This implementation is a first integration baseline. Before public commercial launch, add email verification, password reset, login/registration rate limiting, admin audit logging, and a documented privacy/retention policy for uploaded payment receipts. Test with non-production users and small authorized payments first.
+
+## Security, subscription and usage updates
+
+- Premium subscriptions now last **60 days** from admin approval. Renewals extend from the later of the current expiry or approval time.
+- The free-copy allowance defaults to **300 per calendar month** and can be changed in Spiel Management → Feature limits.
+- The Premium tab is shown only to signed-in users. Signed-out visitors see a Sign in / Register entry instead.
+- Reaching the free-copy allowance opens a blocking upgrade dialog. Copy enforcement remains server-side.
+- Administrator access requires the existing PIN followed by a time-based one-time password (TOTP) from Google Authenticator or another compatible authenticator.
+
+### First-time Google Authenticator binding
+
+1. Deploy the application and apply migration `0004_security_limits.sql`.
+2. Open Spiel Management and enter the administrator PIN.
+3. On first setup, add an account in Google Authenticator using **Enter a setup key**.
+4. Account name: `Spiel Manager Administrator`; key type: Time based; paste the secret shown by the application.
+5. Enter the current six-digit code to complete binding.
+6. Future administrator logins require both the PIN and a current authenticator code.
+
+Keep access to the D1 database restricted: the TOTP seed is stored in the administrator security table. If the authenticator device is lost, an authorized operator must perform a controlled recovery by removing the `totp_secret` from `admin_security` in D1, then re-enroll. Do not expose or share the seed.
+
+### Deploy
+
+Run `npm run build`, then `npx wrangler d1 migrations apply spiel-manager-db --remote`, then `npx wrangler deploy`. Keep your existing D1 database ID, Worker secrets, R2 bucket binding, and template data. Do not run the Excel import again.
