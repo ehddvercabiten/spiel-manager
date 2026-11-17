@@ -40,3 +40,10 @@
 .limit-modal h3{margin:12px 0 8px}.limit-modal p{line-height:1.55;color:var(--muted,#667085)}
 .totp-secret{display:block;word-break:break-all;background:var(--surface,#f3f5f8);border:1px solid var(--border,#dce2ea);border-radius:8px;padding:12px;font-size:15px;letter-spacing:1.5px;margin:12px 0}
 .limit-settings{margin:24px 0}.limit-settings h3{margin:6px 0 14px}.success-text{color:#16834a;font-size:13px}
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
