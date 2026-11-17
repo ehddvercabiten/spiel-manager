@@ -93,6 +93,14 @@ export default function App() {
     const [timeCopyState, setTimeCopyState] = useState(false);
     const requestNumber = useRef(0);
     const selectedRegion = REGIONS.find(r => r.code === regionCode) ?? REGIONS[0];
+    // Admin UI state is deliberately not restored from browser storage after refresh.
+    // The Worker must independently validate the completed MFA session.
+    useEffect(() => {
+        setAdminUnlocked(false);
+        setAdminMfaStep("pin");
+        setTotpCode("");
+        setTotpSecret("");
+    }, []);
     useEffect(() => {
         api<{
             user: {
@@ -256,11 +264,13 @@ export default function App() {
         }
     }
     async function goSelection() {
-        if (adminUnlocked) {
-            try {
-                await api("/api/admin/logout", { method: "POST" });
-            }
-            catch { /* logout locally */ }
+        // Revoke either a full admin session or an unfinished MFA challenge.
+        // This prevents a pending PIN challenge from lingering after leaving management.
+        try {
+            await api("/api/admin/logout", { method: "POST" });
+        }
+        catch {
+            // Always clear local UI state even if the server is temporarily unavailable.
         }
         setTab("selection");
         setAdminUnlocked(false);
@@ -276,18 +286,31 @@ export default function App() {
         }>("/api/admin/templates");
         setAdminTemplates(data.templates);
     }
+    /**
+     * Opens the management area only when the Worker confirms a completed
+     * PIN + authenticator session. A pending MFA challenge is never enough.
+     */
     async function openManagement() {
         setError("");
         setMessage("");
+        setAdminUnlocked(false);
+        setAdminPin("");
+        setAdminMfaStep("pin");
+        setTotpCode("");
+        setTotpSecret("");
+        setAdminTemplates([]);
+
         try {
             await api("/api/admin/session");
             await loadAdminTemplates();
             setAdminUnlocked(true);
-        }
-        catch {
+            const settings = await api<{ freeCopyLimit: number }>("/api/admin/settings");
+            setFreeLimit(settings.freeCopyLimit);
+        } catch {
+            // Do not render admin data unless the server validates the full MFA session.
             setAdminUnlocked(false);
-            setAdminPin("");
         }
+
         setTab("management");
     }
     async function unlock() {
@@ -320,6 +343,9 @@ export default function App() {
         setError("");
         try {
             await api("/api/admin/mfa/verify", { method: "POST", body: JSON.stringify({ code: totpCode }) });
+            // Confirm that the newly issued full admin cookie is accepted before
+            // showing any protected management content.
+            await api("/api/admin/session");
             setTotpCode("");
             setAdminUnlocked(true);
             setAdminMfaStep("pin");

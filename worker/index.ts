@@ -7,14 +7,26 @@ interface Env {
   RECEIPTS_BUCKET?: any;
   PAYMENT_QR_URL?: string;
 }
-const USER_COOKIE="spiel_user_session";
-const ADMIN_COOKIE="spiel_admin_session";
-const DEFAULT_FREE_COPY_LIMIT=300;
-const PLAN_PRICE=49;
-const PLAN_DAYS=60;
-const SESSION_SECONDS=60*60*24*30;
+const USER_COOKIE = "spiel_user_session";
+
+/**
+ * Admin authentication uses two different cookies:
+ * - ADMIN_PENDING_COOKIE: short-lived PIN-verified challenge; never grants admin access.
+ * - ADMIN_COOKIE: created only after a valid Google Authenticator code.
+ */
+const ADMIN_PENDING_COOKIE = "spiel_admin_mfa_pending";
+const ADMIN_COOKIE = "spiel_admin_session";
+
+const DEFAULT_FREE_COPY_LIMIT = 300;
+const PLAN_PRICE = 49;
+const PLAN_DAYS = 60;
+const USER_SESSION_SECONDS = 60 * 60 * 24 * 30;
+const ADMIN_SESSION_SECONDS = 60 * 30;
+const ADMIN_MFA_CHALLENGE_SECONDS = 60 * 5;
+const ADMIN_MFA_MAX_ATTEMPTS = 5;
 const json=(data:unknown,status=200,headers:HeadersInit={})=>new Response(JSON.stringify(data),{status,headers:{"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store",...headers}});
-const err=(message:string,status=400)=>json({error:message},status);
+const err = (message: string, status = 400, headers: HeadersInit = {}) =>
+  json({ error: message }, status, headers);
 const nowSec=()=>Math.floor(Date.now()/1000);
 const monthKey=()=>new Date().toISOString().slice(0,7);
 async function hash(value:string){const b=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(value));return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,"0")).join("");}
@@ -27,8 +39,39 @@ async function userId(req:Request,env:Env):Promise<string|null>{
  const row=await env.DB.prepare("SELECT user_id FROM user_sessions WHERE token_hash=? AND expires_at>?").bind(await hash(token),nowSec()).first<{user_id:string}>();
  return row?.user_id||null;
 }
-async function adminOk(req:Request,env:Env){const token=cookie(req,ADMIN_COOKIE);if(!token)return false;return !!await env.DB.prepare("SELECT token_hash FROM admin_sessions WHERE token_hash=? AND expires_at>? AND mfa_verified=1").bind(await hash(token),nowSec()).first();}
-async function adminPending(req:Request,env:Env){const token=cookie(req,ADMIN_COOKIE);if(!token)return false;return !!await env.DB.prepare("SELECT token_hash FROM admin_sessions WHERE token_hash=? AND expires_at>? AND mfa_verified=0").bind(await hash(token),nowSec()).first();}
+/**
+ * Full administrator access is granted only by a session created after TOTP succeeds.
+ * Every protected admin API route must call this helper.
+ */
+async function adminOk(req: Request, env: Env): Promise<boolean> {
+  const token = cookie(req, ADMIN_COOKIE);
+  if (!token) return false;
+
+  const session = await env.DB.prepare(
+    "SELECT token_hash FROM admin_sessions WHERE token_hash = ? AND expires_at > ? AND mfa_verified = 1",
+  )
+    .bind(await hash(token), nowSec())
+    .first();
+
+  return Boolean(session);
+}
+
+/**
+ * A pending challenge is stored separately from authenticated admin sessions.
+ * Its cookie can access only the MFA setup/verification endpoints.
+ */
+async function adminPending(req: Request, env: Env): Promise<boolean> {
+  const token = cookie(req, ADMIN_PENDING_COOKIE);
+  if (!token) return false;
+
+  const challenge = await env.DB.prepare(
+    "SELECT token_hash FROM admin_pending_sessions WHERE token_hash = ? AND expires_at > ? AND attempts < ?",
+  )
+    .bind(await hash(token), nowSec(), ADMIN_MFA_MAX_ATTEMPTS)
+    .first();
+
+  return Boolean(challenge);
+}
 async function getSetting(env:Env,key:string,fallback:string){const row=await env.DB.prepare("SELECT value FROM app_settings WHERE key=?").bind(key).first<{value:string}>();return row?.value??fallback;}
 async function freeCopyLimit(env:Env){const n=Number(await getSetting(env,"free_copy_limit",String(DEFAULT_FREE_COPY_LIMIT)));return Number.isInteger(n)&&n>=1&&n<=100000?n:DEFAULT_FREE_COPY_LIMIT;}
 function base32(bytes:Uint8Array){const alphabet="ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";let bits=0,value=0,out="";for(const byte of bytes){value=(value<<8)|byte;bits+=8;while(bits>=5){out+=alphabet[(value>>>(bits-5))&31];bits-=5;}}if(bits)out+=alphabet[(value<<(5-bits))&31];return out;}
@@ -36,12 +79,49 @@ function unbase32(input:string){const alphabet="ABCDEFGHIJKLMNOPQRSTUVWXYZ234567
 async function totp(secret:string,at=Date.now()){const key=await crypto.subtle.importKey('raw',unbase32(secret),{name:'HMAC',hash:'SHA-1'},false,['sign']);const counter=Math.floor(at/30000);const msg=new Uint8Array(8);let n=counter;for(let i=7;i>=0;i--){msg[i]=n&255;n=Math.floor(n/256);}const mac=new Uint8Array(await crypto.subtle.sign('HMAC',key,msg));const offset=mac[mac.length-1]&15;const bin=((mac[offset]&127)<<24)|(mac[offset+1]<<16)|(mac[offset+2]<<8)|mac[offset+3];return String(bin%1000000).padStart(6,'0');}
 async function verifyTotp(secret:string,code:string){if(!/^\d{6}$/.test(code))return false;const now=Date.now();for(const drift of [-30000,0,30000])if(await totp(secret,now+drift)===code)return true;return false;}
 
-async function createSession(env:Env,table:"user_sessions"|"admin_sessions",ownerColumn:"user_id"|null,owner:string|null){
- const token=crypto.randomUUID()+crypto.randomUUID().replaceAll("-","");
- const tokenHash=await hash(token),now=nowSec(),expires=now+SESSION_SECONDS;
- if(table==="user_sessions") await env.DB.prepare("INSERT INTO user_sessions(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)").bind(tokenHash,owner,expires,now).run();
- else await env.DB.prepare("INSERT INTO admin_sessions(token_hash,expires_at,created_at) VALUES(?,?,?)").bind(tokenHash,expires,now).run();
- return token;
+/** Creates a regular customer session. */
+async function createUserSession(env: Env, userId: string): Promise<string> {
+  const token = `${crypto.randomUUID()}${crypto.randomUUID().replaceAll("-", "")}`;
+  const tokenHash = await hash(token);
+  const now = nowSec();
+
+  await env.DB.prepare(
+    "INSERT INTO user_sessions(token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)",
+  )
+    .bind(tokenHash, userId, now + USER_SESSION_SECONDS, now)
+    .run();
+
+  return token;
+}
+
+/** Creates a temporary challenge after the administrator PIN is verified. */
+async function createAdminMfaChallenge(env: Env): Promise<string> {
+  const token = `${crypto.randomUUID()}${crypto.randomUUID().replaceAll("-", "")}`;
+  const tokenHash = await hash(token);
+  const now = nowSec();
+
+  await env.DB.prepare(
+    "INSERT INTO admin_pending_sessions(token_hash, expires_at, attempts, created_at) VALUES (?, ?, 0, ?)",
+  )
+    .bind(tokenHash, now + ADMIN_MFA_CHALLENGE_SECONDS, now)
+    .run();
+
+  return token;
+}
+
+/** Creates the real admin session. Called only after successful TOTP verification. */
+async function createAdminSession(env: Env): Promise<string> {
+  const token = `${crypto.randomUUID()}${crypto.randomUUID().replaceAll("-", "")}`;
+  const tokenHash = await hash(token);
+  const now = nowSec();
+
+  await env.DB.prepare(
+    "INSERT INTO admin_sessions(token_hash, expires_at, created_at, mfa_verified) VALUES (?, ?, ?, 1)",
+  )
+    .bind(tokenHash, now + ADMIN_SESSION_SECONDS, now)
+    .run();
+
+  return token;
 }
 async function usage(env:Env,id:string){
  const FREE_COPY_LIMIT=await freeCopyLimit(env);
@@ -87,16 +167,16 @@ async function api(req:Request,env:Env):Promise<Response>{
   if(exists)return err("An account with this email already exists.",409);
   const id=crypto.randomUUID(),passwordHash=await bcrypt.hash(b.password,10),now=new Date().toISOString();
   await env.DB.prepare("INSERT INTO users(id,email,password_hash,status,created_at) VALUES(?,?,?,'ACTIVE',?)").bind(id,email,passwordHash,now).run();
-  const token=await createSession(env,"user_sessions","user_id",id);
-  return json({user:await currentUser(new Request(req.url,{headers:{"Cookie":`${USER_COOKIE}=${token}`}}),env)},201,{"Set-Cookie":setCookie(USER_COOKIE,token,SESSION_SECONDS)});
+  const token=await createUserSession(env, id);
+  return json({user:await currentUser(new Request(req.url,{headers:{"Cookie":`${USER_COOKIE}=${token}`}}),env)},201,{"Set-Cookie":setCookie(USER_COOKIE, token, USER_SESSION_SECONDS)});
  }
  if(p==="/api/auth/login"&&m==="POST"){
   let b:any;try{b=await req.json();}catch{return err("Invalid request body.");}
   const email=validEmail(b.email)?b.email.trim().toLowerCase():"";
   const row=await env.DB.prepare("SELECT id,email,password_hash,status FROM users WHERE email=?").bind(email).first<any>();
   if(!row||row.status!=="ACTIVE"||typeof b.password!=="string"||!(await bcrypt.compare(b.password,row.password_hash)))return err("Incorrect email or password.",401);
-  const token=await createSession(env,"user_sessions","user_id",row.id);
-  return json({user:await currentUser(new Request(req.url,{headers:{"Cookie":`${USER_COOKIE}=${token}`}}),env)},200,{"Set-Cookie":setCookie(USER_COOKIE,token,SESSION_SECONDS)});
+  const token=await createUserSession(env, row.id);
+  return json({user:await currentUser(new Request(req.url,{headers:{"Cookie":`${USER_COOKIE}=${token}`}}),env)},200,{"Set-Cookie":setCookie(USER_COOKIE, token, USER_SESSION_SECONDS)});
  }
  if(p==="/api/auth/me"&&m==="GET"){const u=await currentUser(req,env);return u?json({user:u}):err("Please sign in to continue.",401);}
  if(p==="/api/auth/logout"&&m==="POST"){
@@ -151,34 +231,207 @@ async function api(req:Request,env:Env):Promise<Response>{
   return json({usage:await usage(env,id)});
  }
  if(p.startsWith("/api/admin/")&&["POST","PUT","DELETE"].includes(m)&&!sameOrigin(req))return err("Cross-origin admin request rejected.",403);
- if(p==="/api/admin/login"&&m==="POST"){
-  let b:any;try{b=await req.json();}catch{return err("Invalid request body.");}
-  const pin=typeof b.pin==="string"?b.pin:"";
-  if(!env.ADMIN_PIN_HASH||pin.length<8||pin.length>128||!(await bcrypt.compare(pin,env.ADMIN_PIN_HASH)))return err("Incorrect PIN.",401);
-  const token=await createSession(env,"admin_sessions",null,null);
-  const mfa=await env.DB.prepare("SELECT totp_secret FROM admin_security WHERE id=1").first<{totp_secret:string}>();
-  return json({authenticated:false,requiresTotp:!!mfa?.totp_secret,requiresSetup:!mfa?.totp_secret},200,{"Set-Cookie":setCookie(ADMIN_COOKIE,token,SESSION_SECONDS)});
+ // Stage 1: verify the PIN and issue a short-lived MFA-only challenge.
+ // No authenticated admin session or ADMIN_COOKIE is created at this stage.
+ if (p === "/api/admin/login" && m === "POST") {
+   // A fresh PIN attempt must not inherit a previously authenticated cookie.
+   const previousAdminToken = cookie(req, ADMIN_COOKIE);
+   if (previousAdminToken) {
+     await env.DB.prepare("DELETE FROM admin_sessions WHERE token_hash = ?")
+       .bind(await hash(previousAdminToken))
+       .run();
+   }
+
+   let body: any;
+   try {
+     body = await req.json();
+   } catch {
+     return err("Invalid request body.", 400, {
+       "Set-Cookie": clearCookie(ADMIN_COOKIE),
+     });
+   }
+
+   const pin = typeof body.pin === "string" ? body.pin : "";
+   if (
+     !env.ADMIN_PIN_HASH ||
+     pin.length < 8 ||
+     pin.length > 128 ||
+     !(await bcrypt.compare(pin, env.ADMIN_PIN_HASH))
+   ) {
+     return err("Incorrect PIN.", 401, {
+       "Set-Cookie": clearCookie(ADMIN_COOKIE),
+     });
+   }
+
+   // Invalidate any previous pending challenge presented by this browser.
+   const previousChallenge = cookie(req, ADMIN_PENDING_COOKIE);
+   if (previousChallenge) {
+     await env.DB.prepare("DELETE FROM admin_pending_sessions WHERE token_hash = ?")
+       .bind(await hash(previousChallenge))
+       .run();
+   }
+
+   const challengeToken = await createAdminMfaChallenge(env);
+   const mfa = await env.DB.prepare(
+     "SELECT totp_secret FROM admin_security WHERE id = 1",
+   ).first<{ totp_secret: string | null }>();
+
+   const responseHeaders = new Headers({
+     "Content-Type": "application/json; charset=utf-8",
+     "Cache-Control": "no-store",
+   });
+   responseHeaders.append(
+     "Set-Cookie",
+     setCookie(ADMIN_PENDING_COOKIE, challengeToken, ADMIN_MFA_CHALLENGE_SECONDS),
+   );
+   responseHeaders.append("Set-Cookie", clearCookie(ADMIN_COOKIE));
+
+   return new Response(
+     JSON.stringify({
+       authenticated: false,
+       requiresTotp: Boolean(mfa?.totp_secret),
+       requiresSetup: !mfa?.totp_secret,
+       challengeExpiresIn: ADMIN_MFA_CHALLENGE_SECONDS,
+     }),
+     { status: 200, headers: responseHeaders },
+   );
  }
- if(p==="/api/admin/mfa/setup"&&m==="POST"){
-  if(!await adminPending(req,env))return err("Enter the administrator PIN first.",401);
-  const existing=await env.DB.prepare("SELECT totp_secret FROM admin_security WHERE id=1").first<{totp_secret:string}>();
-  if(existing?.totp_secret)return err("Authenticator is already configured. Sign in with your authenticator code.",409);
-  const secret=base32(crypto.getRandomValues(new Uint8Array(20)));
-  await env.DB.prepare("INSERT INTO admin_security(id,pending_secret,updated_at) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET pending_secret=excluded.pending_secret,updated_at=excluded.updated_at").bind(secret,nowSec()).run();
-  const issuer="Spiel%20Manager",account="Administrator";
-  return json({secret,otpauthUrl:`otpauth://totp/${issuer}:${account}?secret=${secret}&issuer=${issuer}&algorithm=SHA1&digits=6&period=30`});
+
+ // Stage 2a: first-time authenticator enrollment. Only a pending challenge is accepted.
+ if (p === "/api/admin/mfa/setup" && m === "POST") {
+   if (!(await adminPending(req, env))) {
+     return err("Your PIN verification has expired. Enter the PIN again.", 401);
+   }
+
+   const existing = await env.DB.prepare(
+     "SELECT totp_secret, pending_secret FROM admin_security WHERE id = 1",
+   ).first<{ totp_secret: string | null; pending_secret: string | null }>();
+
+   if (existing?.totp_secret) {
+     return err("Authenticator is already configured. Enter your authenticator code.", 409);
+   }
+
+   // Reuse the pending enrollment seed if the user refreshes during setup.
+   const secret = existing?.pending_secret || base32(crypto.getRandomValues(new Uint8Array(20)));
+
+   await env.DB.prepare(
+     `INSERT INTO admin_security(id, pending_secret, updated_at)
+      VALUES (1, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        pending_secret = COALESCE(admin_security.pending_secret, excluded.pending_secret),
+        updated_at = excluded.updated_at`,
+   )
+     .bind(secret, nowSec())
+     .run();
+
+   const issuer = "Spiel%20Manager";
+   const account = "Administrator";
+   const otpauthUrl =
+     `otpauth://totp/${issuer}:${account}?secret=${secret}` +
+     `&issuer=${issuer}&algorithm=SHA1&digits=6&period=30`;
+
+   return json({ secret, otpauthUrl });
  }
- if(p==="/api/admin/mfa/verify"&&m==="POST"){
-  if(!await adminPending(req,env))return err("Administrator PIN session is missing.",401);
-  let b:any;try{b=await req.json();}catch{return err("Invalid request body.");}
-  const record=await env.DB.prepare("SELECT totp_secret,pending_secret FROM admin_security WHERE id=1").first<any>();
-  const secret=record?.totp_secret||record?.pending_secret;
-  if(!secret||!(await verifyTotp(secret,String(b.code||''))))return err("Invalid authenticator code.",401);
-  if(!record.totp_secret)await env.DB.prepare("INSERT INTO admin_security(id,totp_secret,updated_at) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET totp_secret=excluded.totp_secret,pending_secret=NULL,updated_at=excluded.updated_at").bind(secret,nowSec()).run();
-  const token=cookie(req,ADMIN_COOKIE)!;
-  await env.DB.prepare("UPDATE admin_sessions SET mfa_verified=1 WHERE token_hash=? AND expires_at>?").bind(await hash(token),nowSec()).run();
-  return json({authenticated:true});
+
+ // Stage 2b: verify TOTP. Only after success is a full admin session created.
+ if (p === "/api/admin/mfa/verify" && m === "POST") {
+   const pendingToken = cookie(req, ADMIN_PENDING_COOKIE);
+   if (!pendingToken || !(await adminPending(req, env))) {
+     return err("Your PIN verification has expired. Enter the PIN again.", 401, {
+       "Set-Cookie": clearCookie(ADMIN_PENDING_COOKIE),
+     });
+   }
+
+   let body: any;
+   try {
+     body = await req.json();
+   } catch {
+     return err("Invalid request body.");
+   }
+
+   const pendingHash = await hash(pendingToken);
+   const challenge = await env.DB.prepare(
+     "SELECT attempts FROM admin_pending_sessions WHERE token_hash = ? AND expires_at > ?",
+   )
+     .bind(pendingHash, nowSec())
+     .first<{ attempts: number }>();
+
+   if (!challenge) {
+     return err("Your PIN verification has expired. Enter the PIN again.", 401, {
+       "Set-Cookie": clearCookie(ADMIN_PENDING_COOKIE),
+     });
+   }
+
+   const record = await env.DB.prepare(
+     "SELECT totp_secret, pending_secret FROM admin_security WHERE id = 1",
+   ).first<{ totp_secret: string | null; pending_secret: string | null }>();
+
+   const secret = record?.totp_secret || record?.pending_secret;
+   const code = typeof body.code === "string" ? body.code : "";
+   const valid = Boolean(secret && (await verifyTotp(secret, code)));
+
+   if (!valid) {
+     const attempts = Number(challenge.attempts || 0) + 1;
+
+     if (attempts >= ADMIN_MFA_MAX_ATTEMPTS) {
+       await env.DB.prepare("DELETE FROM admin_pending_sessions WHERE token_hash = ?")
+         .bind(pendingHash)
+         .run();
+
+       return err("Too many incorrect authenticator codes. Start again with your PIN.", 429, {
+         "Set-Cookie": clearCookie(ADMIN_PENDING_COOKIE),
+       });
+     }
+
+     await env.DB.prepare(
+       "UPDATE admin_pending_sessions SET attempts = ? WHERE token_hash = ?",
+     )
+       .bind(attempts, pendingHash)
+       .run();
+
+     return err(
+       `Invalid authenticator code. ${ADMIN_MFA_MAX_ATTEMPTS - attempts} attempt(s) remaining.`,
+       401,
+     );
+   }
+
+   // First successful TOTP confirms and activates the pending enrollment seed.
+   if (!record?.totp_secret) {
+     await env.DB.prepare(
+       `INSERT INTO admin_security(id, totp_secret, pending_secret, updated_at)
+        VALUES (1, ?, NULL, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          totp_secret = excluded.totp_secret,
+          pending_secret = NULL,
+          updated_at = excluded.updated_at`,
+     )
+       .bind(secret, nowSec())
+       .run();
+   }
+
+   const adminToken = await createAdminSession(env);
+
+   // Consume the one-time challenge so it cannot be replayed.
+   await env.DB.prepare("DELETE FROM admin_pending_sessions WHERE token_hash = ?")
+     .bind(pendingHash)
+     .run();
+
+   const responseHeaders = new Headers({
+     "Content-Type": "application/json; charset=utf-8",
+     "Cache-Control": "no-store",
+   });
+   responseHeaders.append(
+     "Set-Cookie",
+     setCookie(ADMIN_COOKIE, adminToken, ADMIN_SESSION_SECONDS),
+   );
+   responseHeaders.append("Set-Cookie", clearCookie(ADMIN_PENDING_COOKIE));
+
+   return new Response(JSON.stringify({ authenticated: true }), {
+     status: 200,
+     headers: responseHeaders,
+   });
  }
+
  if(p==="/api/admin/settings"&&m==="GET"){
   if(!await adminOk(req,env))return err("Administrator authentication required.",401);
   return json({freeCopyLimit:await freeCopyLimit(env),premiumDays:PLAN_DAYS,price:PLAN_PRICE});
@@ -191,7 +444,34 @@ async function api(req:Request,env:Env):Promise<Response>{
   await env.DB.prepare("INSERT INTO app_settings(key,value,updated_at) VALUES('free_copy_limit',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").bind(String(limit),nowSec()).run();
   return json({freeCopyLimit:limit,premiumDays:PLAN_DAYS,price:PLAN_PRICE});
  }
- if(p==="/api/admin/logout"&&m==="POST"){const t=cookie(req,ADMIN_COOKIE);if(t)await env.DB.prepare("DELETE FROM admin_sessions WHERE token_hash=?").bind(await hash(t)).run();return json({authenticated:false},200,{"Set-Cookie":clearCookie(ADMIN_COOKIE)});}
+ if (p === "/api/admin/logout" && m === "POST") {
+   const adminToken = cookie(req, ADMIN_COOKIE);
+   const pendingToken = cookie(req, ADMIN_PENDING_COOKIE);
+
+   if (adminToken) {
+     await env.DB.prepare("DELETE FROM admin_sessions WHERE token_hash = ?")
+       .bind(await hash(adminToken))
+       .run();
+   }
+
+   if (pendingToken) {
+     await env.DB.prepare("DELETE FROM admin_pending_sessions WHERE token_hash = ?")
+       .bind(await hash(pendingToken))
+       .run();
+   }
+
+   const responseHeaders = new Headers({
+     "Content-Type": "application/json; charset=utf-8",
+     "Cache-Control": "no-store",
+   });
+   responseHeaders.append("Set-Cookie", clearCookie(ADMIN_COOKIE));
+   responseHeaders.append("Set-Cookie", clearCookie(ADMIN_PENDING_COOKIE));
+
+   return new Response(JSON.stringify({ authenticated: false }), {
+     status: 200,
+     headers: responseHeaders,
+   });
+ }
  if(p==="/api/admin/session"&&m==="GET")return await adminOk(req,env)?json({authenticated:true}):err("Administrator authentication required.",401);
  if(p==="/api/admin/payments"&&m==="GET"){
   if(!await adminOk(req,env))return err("Administrator authentication required.",401);

@@ -160,3 +160,25 @@ Keep access to the D1 database restricted: the TOTP seed is stored in the admini
 ### Deploy
 
 Run `npm run build`, then `npx wrangler d1 migrations apply spiel-manager-db --remote`, then `npx wrangler deploy`. Keep your existing D1 database ID, Worker secrets, R2 bucket binding, and template data. Do not run the Excel import again.
+
+
+## Administrator MFA hardening (migration 0005)
+
+The PIN and authenticator steps use separate server-side states:
+
+1. `POST /api/admin/login` verifies the PIN and creates only a five-minute row in `admin_pending_sessions`.
+2. The short-lived `spiel_admin_mfa_pending` HttpOnly cookie can call only MFA setup/verification endpoints.
+3. A successful TOTP creates a separate `admin_sessions` record with `mfa_verified = 1` and sets `spiel_admin_session`.
+4. Every protected admin endpoint checks the authenticated admin session. The pending cookie is never accepted by `adminOk`.
+5. Five invalid authenticator codes consume and revoke the pending challenge.
+6. Admin sessions last 30 minutes. Customer sessions retain their 30-day lifetime.
+7. Migration `0005_separate_admin_mfa_challenges.sql` revokes legacy admin sessions once and creates the pending-challenge table.
+
+After deploying this version, apply the new migration before testing admin login:
+
+```bash
+npx wrangler d1 migrations apply spiel-manager-db --remote --config wrangler.local.jsonc
+npx wrangler deploy --config wrangler.local.jsonc
+```
+
+Do not manually set `mfa_verified` to 1 or reuse a pending challenge as an admin session.
