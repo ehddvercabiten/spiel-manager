@@ -1,3 +1,4 @@
+import { SubscriptionPanel, AdminPayments } from "./SubscriptionPanel";
 import { useEffect, useRef, useState } from "react";
 
 import { Clipboard, Copy, LockKeyhole, LogOut, ShieldCheck, Plus, Trash2, Pencil, Clock3, CheckCircle2, AlertCircle } from "lucide-react";
@@ -76,7 +77,7 @@ function formatTime(epochMs: number, zone: string, seconds = true): string {
 
 export default function App() {
 
-  const [tab, setTab] = useState<"selection" | "management">("selection");
+  const [tab, setTab] = useState<"selection" | "management" | "subscription">("selection");
 
   const [regionCode, setRegionCode] = useState("R001");
 
@@ -310,6 +311,7 @@ export default function App() {
     if (liveEpoch === null) return;
 
     try {
+      await api("/api/usage/copy", { method: "POST" });
       const currentTime = formatTime(liveEpoch, selectedRegion.zone);
       await navigator.clipboard.writeText(currentTime);
       setTimeCopyState(true);
@@ -324,6 +326,7 @@ export default function App() {
 
     try {
 
+      await api("/api/usage/copy", { method: "POST" });
       await navigator.clipboard.writeText(generated);
 
       setCopyState(true);
@@ -519,6 +522,7 @@ export default function App() {
       <button className={tab === "selection" ? "tab active" : "tab"} onClick={() => void goSelection()}><Clipboard size={16}/> Spiel Selection</button>
 
       <button className={tab === "management" ? "tab active" : "tab"} onClick={() => void openManagement()}><LockKeyhole size={16}/> Spiel Management <span className="lock-label">PIN PROTECTED</span></button>
+      <button className={tab === "subscription" ? "tab active" : "tab"} onClick={() => {setError("");setMessage("");setTab("subscription");}}>Premium</button>
 
     </nav>
 
@@ -544,11 +548,15 @@ export default function App() {
 
     </main>}
 
+    {tab === "subscription" && <SubscriptionPanel />}
+
     {tab === "management" && <main className="panel">
 
       {!adminUnlocked ? <div className="login-card"><div className="secure-icon"><ShieldCheck size={26}/></div><div className="eyebrow">RESTRICTED AREA</div><h3>Administrator access</h3><p>Enter the administrator PIN to manage saved spiel templates.</p><form onSubmit={e => { e.preventDefault(); void unlock(); }}><input type="password" value={adminPin} onChange={e => setAdminPin(e.target.value)} placeholder="Administrator PIN" autoComplete="current-password" minLength={8}/><button className="primary full" disabled={adminPin.length < 8}>Unlock management</button></form></div>
 
       : <><div className="panel-heading"><div><div className="eyebrow">ADMINISTRATION</div><h3>Manage saved spiels</h3></div><button className="quiet" onClick={() => void goSelection()}><LogOut size={16}/> Lock & exit</button></div>
+
+        <AdminPayments />
 
         <div className="admin-form"><div className="field-grid"><label>Spiel name<input value={formName} onChange={e => setFormName(e.target.value)} placeholder="e.g. Coffeehouse - No Shot"/></label><label className="checkbox-field"><input type="checkbox" checked={formActive} onChange={e => setFormActive(e.target.checked)}/> Available to users</label></div><label>Spiel template <span className="hint-inline">Required placeholder: {"{{TIME}}"}</span><textarea value={formSpiel} onChange={e => setFormSpiel(e.target.value)} rows={5} placeholder="Called the coffeehouse at {{TIME}} to verify…"/></label><div className="form-actions"><button className="primary" onClick={() => void saveTemplate()} disabled={!formName.trim() || !formSpiel.includes("{{TIME}}") }><Plus size={16}/>{editingId ? "Save changes" : "Add spiel"}</button><button className="quiet" onClick={clearForm}>Clear</button></div></div>
 

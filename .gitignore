@@ -4,13 +4,9 @@ dist/
 .env.production
 *.log
 
+# Wrangler configuration files
+wrangler.jsonc
+
 # Runtime security/session state (keep private)
 data/admin-login-attempts.json
 data/sessions/
-
-# Cloudflare Wrangler local state and build cache
-.wrangler/
-
-.dev.vars
-.wrangler/
-migrations/0002_import_existing_templates.sql

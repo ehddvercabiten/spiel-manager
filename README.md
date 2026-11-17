@@ -93,46 +93,47 @@ Set `PORT`, `ADMIN_PIN_HASH`, and `SESSION_SECRET` in the hosting provider's ser
 ## Online time and region mapping
 The server requests UTC from TimeAPI.io and parses its `dateTime` field (the API does not return `unixTime`). If that provider fails, it uses the independent TimeAPI World endpoint, which returns a Unix `unixtime`. The React client formats the returned instant in the selected IANA time zone. If both fail, the app displays an error and does not substitute the computer clock. The region mappings are representative interpretations of the supplied region slide; verify the official internal mapping before operational use. Daylight-saving abbreviations are generated using the IANA time-zone database.
 
+## Subscription and Maya Checkout
 
-## Cloudflare Workers + D1 migration
+- Free accounts receive 300 copy actions per UTC calendar month.
+- Both Copy time and Copy spiel consume one copy action.
+- Premium costs PHP 49 for 30 days. This is a one-time Maya Checkout payment; renewal is user-initiated, not automatic recurring billing.
+- Users register with email/password. Password minimum is 10 characters.
+- The Worker enforces the copy allowance server-side.
+- Set Worker secrets: `ADMIN_PIN_HASH` (existing bcrypt hash), `MAYA_PUBLIC_KEY` (Maya Checkout public API key). Never expose the key in frontend code.
+- Set Worker vars: `MAYA_ENV=sandbox` for testing or `production` for live; `APP_BASE_URL=https://your-worker-domain`.
+- Maya Checkout onboarding and active API credentials are required before payments can be processed.
+- Register `https://YOUR-WORKER-URL/api/payments/maya/webhook` for `PAYMENT_SUCCESS` in Maya Manager.
+- The webhook accepts documented Maya environment IP addresses and processes `PAYMENT_SUCCESS`.
+- Each 30-day renewal requires a new checkout; this is not an automatic recurring card/wallet mandate.
 
-The Cloudflare deployment uses `worker/index.ts` and serves the Vite `dist/`
-assets from the same Worker origin. The legacy Express files remain in the
-repository for reference/local rollback; they are not part of the Worker entry.
 
-### First-time setup
+## Manual GCash subscription payments (₱49 / 30 days)
 
-1. Install dependencies with `npm install`.
-2. Authenticate: `npx wrangler login`.
-3. Create the D1 database: `npm run db:create`.
-4. Copy the returned database ID into `wrangler.jsonc`, replacing
-   `REPLACE_WITH_D1_DATABASE_ID`.
-5. Apply the initial schema: `npm run db:migrate:production`.
-6. Set the existing bcrypt PIN hash as a Worker secret:
-   `npx wrangler secret put ADMIN_PIN_HASH`.
-   Paste the existing value from your private `.env` when prompted. The uploaded
-   ZIP did not contain `.env`, so it cannot recover or verify that hash.
-7. Prepare the Excel import SQL:
-   `npm run db:import:prepare`.
-8. Review `migrations/0002_import_existing_templates.sql`, then apply it:
-   `npx wrangler d1 execute spiel-manager-db --remote --file=migrations/0002_import_existing_templates.sql`.
-9. Deploy: `npm run deploy`.
+This build uses manual payment review. It does not call Maya Checkout or any payment gateway. A customer creates an account, scans the configured QR image, submits a GCash transaction reference and receipt, and waits for an administrator to verify the incoming transaction in the receiving account. Only admin approval activates Premium.
 
-### Local Worker development
+### Before deployment
 
-Create `.dev.vars` from `.dev.vars.example` and insert your existing
-`ADMIN_PIN_HASH`. Apply local migrations with `npm run db:migrate:local`,
-then run `npx wrangler dev`.
+1. Confirm with GCash that the receiving account and QR may be used for your intended online subscription payments. The included QR is a non-payable demo placeholder. Do not replace it with a personal QR unless GCash has authorized that use.
+2. In Cloudflare, create an R2 bucket named `spiel-manager-payment-receipts` (or change the bucket name in `wrangler.jsonc`). Keep it private; do not enable public access.
+3. Confirm the D1 database ID in `wrangler.jsonc`. Do not recreate the database or re-import the workbook.
+4. From the project root run `npm ci`, `npm run build`, then `npx wrangler r2 bucket create spiel-manager-payment-receipts` if the bucket does not exist.
+5. Apply migrations with `npx wrangler d1 migrations apply spiel-manager-db --remote`. The migration runner applies only migrations not yet applied.
+6. Deploy with `npx wrangler deploy`.
 
-### Important migration notes
+### Payment review
 
-- The workbook is imported into D1; the original `data/spiel-templates.xlsx`
-  remains in the repository as a backup and is not served to browsers.
-- The production Worker uses D1 for templates, sessions, and failed login attempts.
-- The current bcrypt PIN hash is a secret and must be copied from your private
-  environment; it is not present in the uploaded source archive.
-- `SESSION_SECRET` and file-backed sessions are no longer used by the Worker.
-  Session tokens are random, stored only as SHA-256 hashes in D1, and expire
-  after 15 minutes.
-- API routes preserve the response shapes expected by the existing React app.
-- Free-plan quotas apply. Monitor Workers and D1 usage in the Cloudflare dashboard.
+- Customer registration is open. Passwords must be at least 10 characters.
+- Free users receive 300 copies per UTC calendar month. Both Copy time and Copy spiel call the Worker usage endpoint.
+- The customer submits ₱49 payment reference, optional payment date, and a PNG/JPG/WebP receipt (max 5 MB). Receipt files are stored in the private R2 bucket.
+- The admin opens Spiel Management, unlocks with the existing admin PIN, then uses Payment Approvals. Open each receipt and independently verify the incoming payment in the GCash receiving account before approving.
+- Approval activates 30 days from now or extends from the later existing Premium expiry. Duplicate payment references are rejected.
+- A screenshot is not proof of settlement. Never approve based only on the uploaded image.
+
+### Replacing the demo QR
+
+Replace `public/payment/gcash-qr-placeholder.png` with your authorized merchant receiving QR, retaining the same filename, then rebuild and redeploy the static assets. The placeholder encodes demo text only and cannot receive money.
+
+### Important rollout checks
+
+This implementation is a first integration baseline. Before public commercial launch, add email verification, password reset, login/registration rate limiting, admin audit logging, and a documented privacy/retention policy for uploaded payment receipts. Test with non-production users and small authorized payments first.

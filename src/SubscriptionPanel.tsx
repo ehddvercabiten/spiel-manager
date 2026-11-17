@@ -1,0 +1,41 @@
+import { useEffect, useState } from 'react';
+
+type Usage = { plan: 'FREE'|'PREMIUM'; copiesUsed: number; copyLimit: number|null; copiesRemaining: number|null; subscriptionExpiresAt: number|null };
+type Payment = { id:string; amount:number; currency:string; payment_reference:string; status:string; submitted_at:number; rejection_reason?:string|null };
+type User = { id:string; email:string; usage:Usage };
+async function request<T>(url:string,init:RequestInit={}):Promise<T>{
+ const headers=new Headers(init.headers); if(init.body&&!headers.has('Content-Type'))headers.set('Content-Type','application/json');
+ const r=await fetch(url,{...init,headers,credentials:'same-origin'}); const d=await r.json().catch(()=>({error:'Unexpected response'})); if(!r.ok)throw new Error(d.error||`Request failed (${r.status})`); return d as T;
+}
+function fileData(file:File):Promise<string>{return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result));reader.onerror=()=>reject(new Error('Could not read receipt image.'));reader.readAsDataURL(file);});}
+export function SubscriptionPanel(){
+ const [user,setUser]=useState<User|null>(null),[email,setEmail]=useState(''),[password,setPassword]=useState(''),[mode,setMode]=useState<'login'|'register'>('register');
+ const [reference,setReference]=useState(''),[paidAt,setPaidAt]=useState(''),[receipt,setReceipt]=useState<File|null>(null),[payments,setPayments]=useState<Payment[]>([]),[qrUrl,setQrUrl]=useState('/payment/gcash-qr-placeholder.png');
+ const [busy,setBusy]=useState(false),[notice,setNotice]=useState(''),[error,setError]=useState('');
+ async function refresh(){const d=await request<{payments:Payment[];usage:Usage;qrUrl:string}>('/api/subscription/payments');setPayments(d.payments);setQrUrl(d.qrUrl);setUser(u=>u?{...u,usage:d.usage}:u);}
+ useEffect(()=>{request<{user:User}>('/api/auth/me').then(d=>{setUser(d.user);}).catch(()=>{});},[]);
+ useEffect(()=>{if(user)void refresh().catch(e=>setError(e.message));},[user?.id]);
+ async function authenticate(e:React.FormEvent){e.preventDefault();setBusy(true);setError('');try{const d=await request<{user:User}>(`/api/auth/${mode}`,{method:'POST',body:JSON.stringify({email,password})});setUser(d.user);setPassword('');setNotice('You are signed in.');}catch(e){setError((e as Error).message);}finally{setBusy(false);}}
+ async function logout(){await request('/api/auth/logout',{method:'POST'});setUser(null);setPayments([]);}
+ async function submit(e:React.FormEvent){e.preventDefault();if(!receipt)return setError('Please upload your GCash receipt.');setBusy(true);setError('');setNotice('');try{const receiptData=await fileData(receipt);await request('/api/subscription/payment',{method:'POST',body:JSON.stringify({reference,paidAt,receiptData,receiptMime:receipt.type})});setReference('');setPaidAt('');setReceipt(null);setNotice('Payment submitted. Premium will activate after administrator verification.');await refresh();}catch(e){setError((e as Error).message);}finally{setBusy(false);}}
+ return <section className="subscription-panel">
+  <div className="sub-heading"><div><div className="sub-eyebrow">ACCOUNT & SUBSCRIPTION</div><h3>Spiel Manager Premium</h3><p>₱49 for 30 days · One-time manual payment · No automatic renewal</p></div>{user&&<button className="sub-secondary" onClick={()=>void logout()}>Sign out</button>}</div>
+  {error&&<div className="sub-error">{error}</div>}{notice&&<div className="sub-notice">{notice}</div>}
+  {!user?<form className="sub-auth" onSubmit={authenticate}><div className="sub-copy"><strong>{mode==='register'?'Create your account':'Welcome back'}</strong><span>Register or sign in to track your monthly copy allowance and subscription.</span></div><input type="email" required maxLength={254} placeholder="Email address" value={email} onChange={e=>setEmail(e.target.value)}/><input type="password" required minLength={10} maxLength={128} placeholder="Password (at least 10 characters)" value={password} onChange={e=>setPassword(e.target.value)}/><button disabled={busy}>{busy?'Please wait…':mode==='register'?'Create account':'Sign in'}</button><button type="button" className="sub-link" onClick={()=>setMode(mode==='register'?'login':'register')}>{mode==='register'?'Already registered? Sign in':'Need an account? Register'}</button></form>:<>
+   <div className="sub-status"><div><span>ACCOUNT</span><strong>{user.email}</strong></div><div><span>PLAN</span><strong>{user.usage.plan}</strong></div><div><span>THIS MONTH</span><strong>{user.usage.copiesUsed}{user.usage.copyLimit?` / ${user.usage.copyLimit}`:' · Unlimited'}</strong></div></div>
+   {user.usage.plan==='PREMIUM'?<div className="sub-notice">Premium active until {user.usage.subscriptionExpiresAt?new Date(user.usage.subscriptionExpiresAt*1000).toLocaleString():''}.</div>:<div className="sub-payment-grid">
+    <div className="sub-qr-card"><strong>1. Scan and pay ₱49</strong><img src={qrUrl} alt="GCash payment QR placeholder"/><small>DEMO QR — replace with an approved receiving QR before accepting payments. Verify the recipient before sending.</small></div>
+    <form className="sub-payment-form" onSubmit={submit}><strong>2. Submit payment for review</strong><label>GCash transaction reference<input required minLength={6} maxLength={100} value={reference} onChange={e=>setReference(e.target.value)} placeholder="Transaction reference"/></label><label>Payment date and time<input type="datetime-local" value={paidAt} onChange={e=>setPaidAt(e.target.value)}/></label><label>Receipt image<input required type="file" accept="image/png,image/jpeg,image/webp" onChange={e=>setReceipt(e.target.files?.[0]||null)}/><small>PNG, JPG or WebP. Maximum 5 MB.</small></label><button disabled={busy}>{busy?'Submitting…':'Submit for admin approval'}</button></form>
+   </div>}
+   <div className="sub-history"><strong>Payment history</strong>{payments.length===0?<p>No payment submissions yet.</p>:payments.map(p=><div className="sub-payment-row" key={p.id}><span>₱{p.amount} · {p.payment_reference}<small>{new Date(p.submitted_at*1000).toLocaleString()}</small></span><b className={`sub-${p.status.toLowerCase()}`}>{p.status}</b>{p.rejection_reason&&<small>{p.rejection_reason}</small>}</div>)}</div>
+  </>}
+ </section>;
+}
+
+export function AdminPayments(){
+ const [rows,setRows]=useState<any[]>([]),[error,setError]=useState(''),[busy,setBusy]=useState('');
+ async function load(){try{const d=await request<{payments:any[]}>('/api/admin/payments');setRows(d.payments);setError('');}catch(e){setError((e as Error).message);}}
+ useEffect(()=>{void load();},[]);
+ async function review(id:string,action:'approve'|'reject'){let reason='';if(action==='reject'){reason=window.prompt('Reason for rejection:','Payment could not be verified.')||'';if(!reason.trim())return;}if(action==='approve'&&!window.confirm('Have you verified the ₱49 payment in your GCash transaction history? Approve this subscription?'))return;setBusy(id);try{await request(`/api/admin/payments/${id}/${action}`,{method:'POST',body:JSON.stringify({reason})});await load();}catch(e){setError((e as Error).message);}finally{setBusy('');}}
+ return <div className="admin-payments"><div className="sub-admin-head"><div><div className="sub-eyebrow">SUBSCRIPTION MANAGEMENT</div><h3>Payment approvals</h3></div><button className="sub-secondary" onClick={()=>void load()}>Refresh</button></div>{error&&<div className="sub-error">{error}</div>}{rows.length===0?<p>No payment submissions.</p>:rows.map(p=><article className="sub-review-card" key={p.id}><div><strong>{p.email}</strong><span>₱{p.amount} · {p.payment_reference}</span><small>Submitted {new Date(p.submitted_at*1000).toLocaleString()}</small><b className={`sub-${String(p.status).toLowerCase()}`}>{p.status}</b></div><div className="sub-review-actions"><a href={`/api/admin/payments/${p.id}/receipt`} target="_blank" rel="noreferrer">View receipt</a>{p.status==='PENDING'&&<><button disabled={busy===p.id} onClick={()=>void review(p.id,'approve')}>Approve</button><button className="sub-reject" disabled={busy===p.id} onClick={()=>void review(p.id,'reject')}>Reject</button></>}</div></article>)}</div>;
+}
