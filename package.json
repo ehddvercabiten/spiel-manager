@@ -10,7 +10,13 @@
     "dev:client": "vite",
     "build": "tsc -b && tsc -p tsconfig.server.json && vite build",
     "start": "node dist-server/index.js",
-    "hash-pin": "node scripts/hash-pin.mjs"
+    "hash-pin": "node scripts/hash-pin.mjs",
+    "deploy:cloudflare": "npm run build && wrangler pages deploy dist --project-name spiel-manager --branch main",
+    "cloudflare:login": "wrangler login",
+    "cloudflare:whoami": "wrangler whoami",
+    "deploy": "bash scripts/deploy-render.sh",
+    "deploy:render": "bash scripts/deploy-render.sh",
+    "build:check": "npm run build"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
@@ -37,6 +43,7 @@
     "rimraf": "^6.1.4",
     "tsx": "^4.19.2",
     "typescript": "~5.7.2",
-    "vite": "^6.0.7"
+    "vite": "^6.0.7",
+    "wrangler": "^4.158.0"
   }
 }

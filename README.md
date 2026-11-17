@@ -92,3 +92,35 @@ Set `PORT`, `ADMIN_PIN_HASH`, and `SESSION_SECRET` in the hosting provider's ser
 
 ## Online time and region mapping
 The server requests UTC from TimeAPI.io and parses its `dateTime` field (the API does not return `unixTime`). If that provider fails, it uses the independent TimeAPI World endpoint, which returns a Unix `unixtime`. The React client formats the returned instant in the selected IANA time zone. If both fail, the app displays an error and does not substitute the computer clock. The region mappings are representative interpretations of the supplied region slide; verify the official internal mapping before operational use. Daylight-saving abbreviations are generated using the IANA time-zone database.
+
+
+## Deployment (Render + persistent storage)
+
+This project is deployed as one Node.js web service: Express serves both the
+compiled Vite frontend (`dist/`) and the `/api/*` endpoints. This keeps API
+requests and secure admin session cookies on the same origin.
+
+A `render.yaml` Blueprint is included. It configures:
+- Node.js web service using `npm ci && npm run build` and `npm start`
+- `/api/health` health check
+- Persistent disk mounted at `/var/data`
+- `DATA_DIR=/var/data`
+- A generated `SESSION_SECRET`
+- `ADMIN_PIN_HASH` supplied manually as a secret
+
+The backend copies the supplied `data/spiel-templates.xlsx` into the persistent
+disk on first startup if the disk does not yet contain a workbook. Existing
+workbook data on the persistent disk is not overwritten.
+
+### Deploying updates
+
+1. Create the Render service from this repository using the included Blueprint.
+2. Set `ADMIN_PIN_HASH` in the Render service environment. Generate it locally:
+   `npm run hash-pin -- "your-long-admin-pin"`
+3. Commit your changes and push them to `main`.
+4. Run `npm run deploy` from Git Bash. The script validates the local build and
+   pushes the already-committed `main` branch to GitHub. Render then performs
+   the actual deployment automatically.
+
+The script does not create a Render service or bypass Render authentication.
+The first-time Blueprint setup is done in the Render Dashboard.

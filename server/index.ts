@@ -11,7 +11,7 @@ import {z} from "zod";
 import {fileURLToPath} from "node:url";
 import {workbookStore} from "./workbook.js";
 const app=express(),PORT=Number(process.env.PORT||5000),prod=process.env.NODE_ENV==="production";
-const securityDir=path.resolve(process.cwd(),"data");
+const securityDir=path.resolve(process.env.DATA_DIR || path.join(process.cwd(),"data"));
 const attemptsFile=path.join(securityDir,"admin-login-attempts.json");
 const secret=process.env.SESSION_SECRET||"",pinHash=process.env.ADMIN_PIN_HASH||"";
 if(secret.length<32)throw new Error("SESSION_SECRET must be at least 32 characters.");

@@ -4,14 +4,21 @@ import path from "node:path";
 import XLSX from "xlsx";
 import type { SpielTemplate } from "./types.js";
 
-const DATA_DIR = path.resolve(process.cwd(), "data");
+const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(process.cwd(), "data"));
 const FILE = path.join(DATA_DIR, "spiel-templates.xlsx");
+const SEED_FILE = path.resolve(process.cwd(), "data", "spiel-templates.xlsx");
 const SHEET = "SpielTemplates";
 
 function ensure(): void {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 
   if (fs.existsSync(FILE)) return;
+
+  // Preserve the project workbook on the first deployment to a new persistent disk.
+  if (fs.existsSync(SEED_FILE) && path.resolve(SEED_FILE) !== path.resolve(FILE)) {
+    fs.copyFileSync(SEED_FILE, FILE);
+    return;
+  }
 
   const wb = XLSX.utils.book_new();
 
