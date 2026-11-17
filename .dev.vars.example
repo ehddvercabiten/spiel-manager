@@ -1,0 +1,2 @@
+# Copy to .dev.vars for local Wrangler development.
+ADMIN_PIN_HASH=replace-with-existing-bcrypt-hash

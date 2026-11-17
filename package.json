@@ -8,15 +8,19 @@
     "dev": "concurrently -k -n SERVER,CLIENT -c blue,green \"npm:dev:server\" \"npm:dev:client\"",
     "dev:server": "tsx watch server/index.ts",
     "dev:client": "vite",
-    "build": "tsc -b && tsc -p tsconfig.server.json && vite build",
+    "build": "tsc -b && vite build",
     "start": "node dist-server/index.js",
     "hash-pin": "node scripts/hash-pin.mjs",
     "deploy:cloudflare": "npm run build && wrangler pages deploy dist --project-name spiel-manager --branch main",
     "cloudflare:login": "wrangler login",
     "cloudflare:whoami": "wrangler whoami",
-    "deploy": "bash scripts/deploy-render.sh",
-    "deploy:render": "bash scripts/deploy-render.sh",
-    "build:check": "npm run build"
+    "dev:worker": "wrangler dev",
+    "db:create": "wrangler d1 create spiel-manager-db",
+    "db:migrate:local": "wrangler d1 migrations apply spiel-manager-db --local",
+    "db:migrate:production": "wrangler d1 migrations apply spiel-manager-db --remote",
+    "db:import:prepare": "node scripts/import-excel-to-d1.mjs",
+    "deploy": "bash scripts/deploy-cloudflare.sh",
+    "deploy:production": "bash scripts/deploy-cloudflare.sh"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

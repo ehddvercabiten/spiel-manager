@@ -94,33 +94,45 @@ Set `PORT`, `ADMIN_PIN_HASH`, and `SESSION_SECRET` in the hosting provider's ser
 The server requests UTC from TimeAPI.io and parses its `dateTime` field (the API does not return `unixTime`). If that provider fails, it uses the independent TimeAPI World endpoint, which returns a Unix `unixtime`. The React client formats the returned instant in the selected IANA time zone. If both fail, the app displays an error and does not substitute the computer clock. The region mappings are representative interpretations of the supplied region slide; verify the official internal mapping before operational use. Daylight-saving abbreviations are generated using the IANA time-zone database.
 
 
-## Deployment (Render + persistent storage)
+## Cloudflare Workers + D1 migration
 
-This project is deployed as one Node.js web service: Express serves both the
-compiled Vite frontend (`dist/`) and the `/api/*` endpoints. This keeps API
-requests and secure admin session cookies on the same origin.
+The Cloudflare deployment uses `worker/index.ts` and serves the Vite `dist/`
+assets from the same Worker origin. The legacy Express files remain in the
+repository for reference/local rollback; they are not part of the Worker entry.
 
-A `render.yaml` Blueprint is included. It configures:
-- Node.js web service using `npm ci && npm run build` and `npm start`
-- `/api/health` health check
-- Persistent disk mounted at `/var/data`
-- `DATA_DIR=/var/data`
-- A generated `SESSION_SECRET`
-- `ADMIN_PIN_HASH` supplied manually as a secret
+### First-time setup
 
-The backend copies the supplied `data/spiel-templates.xlsx` into the persistent
-disk on first startup if the disk does not yet contain a workbook. Existing
-workbook data on the persistent disk is not overwritten.
+1. Install dependencies with `npm install`.
+2. Authenticate: `npx wrangler login`.
+3. Create the D1 database: `npm run db:create`.
+4. Copy the returned database ID into `wrangler.jsonc`, replacing
+   `REPLACE_WITH_D1_DATABASE_ID`.
+5. Apply the initial schema: `npm run db:migrate:production`.
+6. Set the existing bcrypt PIN hash as a Worker secret:
+   `npx wrangler secret put ADMIN_PIN_HASH`.
+   Paste the existing value from your private `.env` when prompted. The uploaded
+   ZIP did not contain `.env`, so it cannot recover or verify that hash.
+7. Prepare the Excel import SQL:
+   `npm run db:import:prepare`.
+8. Review `migrations/0002_import_existing_templates.sql`, then apply it:
+   `npx wrangler d1 execute spiel-manager-db --remote --file=migrations/0002_import_existing_templates.sql`.
+9. Deploy: `npm run deploy`.
 
-### Deploying updates
+### Local Worker development
 
-1. Create the Render service from this repository using the included Blueprint.
-2. Set `ADMIN_PIN_HASH` in the Render service environment. Generate it locally:
-   `npm run hash-pin -- "your-long-admin-pin"`
-3. Commit your changes and push them to `main`.
-4. Run `npm run deploy` from Git Bash. The script validates the local build and
-   pushes the already-committed `main` branch to GitHub. Render then performs
-   the actual deployment automatically.
+Create `.dev.vars` from `.dev.vars.example` and insert your existing
+`ADMIN_PIN_HASH`. Apply local migrations with `npm run db:migrate:local`,
+then run `npx wrangler dev`.
 
-The script does not create a Render service or bypass Render authentication.
-The first-time Blueprint setup is done in the Render Dashboard.
+### Important migration notes
+
+- The workbook is imported into D1; the original `data/spiel-templates.xlsx`
+  remains in the repository as a backup and is not served to browsers.
+- The production Worker uses D1 for templates, sessions, and failed login attempts.
+- The current bcrypt PIN hash is a secret and must be copied from your private
+  environment; it is not present in the uploaded source archive.
+- `SESSION_SECRET` and file-backed sessions are no longer used by the Worker.
+  Session tokens are random, stored only as SHA-256 hashes in D1, and expire
+  after 15 minutes.
+- API routes preserve the response shapes expected by the existing React app.
+- Free-plan quotas apply. Monitor Workers and D1 usage in the Cloudflare dashboard.
