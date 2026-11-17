@@ -137,7 +137,7 @@ export default function App() {
 
     api<{ templates: Pick<Template, "id" | "name">[] }>("/api/templates")
 
-      .then(d => setTemplates(Array.isArray(d.templates) ? d.templates : []))
+      .then(d => setTemplates(d.templates))
 
       .catch(e => setError((e as Error).message));
 
@@ -384,7 +384,7 @@ export default function App() {
 
     const data = await api<{ templates: Template[] }>("/api/admin/templates");
 
-    setAdminTemplates(Array.isArray(data.templates) ? data.templates : []);
+    setAdminTemplates(data.templates);
 
   }
 
@@ -455,10 +455,9 @@ export default function App() {
 
     const data = await api<{ templates: Pick<Template, "id" | "name">[] }>("/api/templates");
 
-    const safeTemplates = Array.isArray(data.templates) ? data.templates : [];
-    setTemplates(safeTemplates);
+    setTemplates(data.templates);
 
-    if (selectedId && !safeTemplates.some(t => t.id === selectedId)) {
+    if (selectedId && !data.templates.some(t => t.id === selectedId)) {
 
       ++requestNumber.current;
 
