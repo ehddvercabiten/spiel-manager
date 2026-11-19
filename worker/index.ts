@@ -224,7 +224,7 @@ async function api(req:Request,env:Env):Promise<Response>{
  if(p==="/api/subscription/payments"&&m==="GET"){
   const id=await userId(req,env);if(!id)return err("Sign in to continue.",401);
   const rows=await env.DB.prepare("SELECT id,amount,currency,payment_reference,status,submitted_at,reviewed_at,rejection_reason FROM manual_payment_submissions WHERE user_id=? ORDER BY submitted_at DESC LIMIT 20").bind(id).all();
-  return json({payments:rows.results||[],usage:await usage(env,id),qrUrl:env.PAYMENT_QR_URL||"/payment/gcash-qr-placeholder.png"});
+  return json({payments:rows.results||[],usage:await usage(env,id),qrUrl:env.PAYMENT_QR_URL||"/payment/gcash-qr-placeholder.jpg"});
  }
  if(p==="/api/subscription/status"&&m==="GET"){
   const id=await userId(req,env);if(!id)return err("Sign in to continue.",401);

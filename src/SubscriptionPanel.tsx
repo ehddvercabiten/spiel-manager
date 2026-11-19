@@ -95,7 +95,7 @@ export function SubscriptionPanel({
   const [paidAt, setPaidAt] = useState("");
   const [receipt, setReceipt] = useState<File | null>(null);
   const [payments, setPayments] = useState<Payment[]>([]);
-  const [qrUrl, setQrUrl] = useState("/payment/gcash-qr-placeholder.png");
+  const [qrUrl, setQrUrl] = useState("/payment/gcash-qr-placeholder.jpg");
 
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
@@ -359,7 +359,7 @@ export function SubscriptionPanel({
                   onError={(event) => {
                     event.currentTarget.onerror = null;
                     event.currentTarget.src =
-                      "/payment/gcash-qr-placeholder.png";
+                      "/payment/gcash-qr-placeholder.jpg";
                   }}
                 />
                 <small>
