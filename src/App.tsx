@@ -92,7 +92,88 @@ export default function App() {
     const [copyState, setCopyState] = useState(false);
     const [timeCopyState, setTimeCopyState] = useState(false);
     const requestNumber = useRef(0);
+    const shortcutCopyInProgress = useRef(false);
     const selectedRegion = REGIONS.find(r => r.code === regionCode) ?? REGIONS[0];
+
+    // Derive the current online-synchronized time before effects that reference it.
+    const liveEpoch = clock ? clock.epochMs + (performance.now() - clock.measuredAt) : null;
+
+    // Intercept normal browser copy actions only when the selection comes from
+    // the generated spiel or the displayed online time. This covers Ctrl+C,
+    // Cmd+C, and the browser context-menu Copy command without counting copies
+    // of unrelated page text. The Worker remains the source of truth for limits.
+    useEffect(() => {
+        const handleShortcutCopy = (event: ClipboardEvent) => {
+            if (tab !== "selection" || shortcutCopyInProgress.current)
+                return;
+
+            const target = event.target;
+            let selectedText = "";
+            let copySource: "spiel" | "time" | null = null;
+
+            if (target instanceof HTMLTextAreaElement && target.dataset.copySource === "spiel") {
+                const start = target.selectionStart;
+                const end = target.selectionEnd;
+                selectedText = target.value.slice(start, end);
+                if (selectedText && generated && selectedText.trim())
+                    copySource = "spiel";
+            }
+            else {
+                const selection = window.getSelection();
+                const anchor = selection?.anchorNode;
+                const anchorElement = anchor instanceof Element
+                    ? anchor
+                    : anchor?.parentElement;
+                const sourceElement = anchorElement?.closest<HTMLElement>("[data-copy-source]");
+                selectedText = selection?.toString() ?? "";
+                if (selectedText.trim() && sourceElement?.dataset.copySource === "time" && liveEpoch !== null)
+                    copySource = "time";
+            }
+
+            if (!copySource || !selectedText)
+                return;
+
+            // Stop the browser's immediate copy so the server can authorize it first.
+            event.preventDefault();
+            shortcutCopyInProgress.current = true;
+
+            void (async () => {
+                try {
+                    await api("/api/usage/copy", { method: "POST" });
+                    await navigator.clipboard.writeText(selectedText);
+                    setError("");
+                    if (copySource === "spiel") {
+                        setCopyState(true);
+                        window.setTimeout(() => setCopyState(false), 1800);
+                    }
+                    else {
+                        setTimeCopyState(true);
+                        window.setTimeout(() => setTimeCopyState(false), 1800);
+                    }
+                }
+                catch (e) {
+                    const copyError = (e as Error).message;
+                    if (copyError.includes("copy limit") || copyError.includes("free limit") || copyError.includes("300-copy")) {
+                        setLimitModal(true);
+                        setTab("selection");
+                    }
+                    else if (copyError.toLowerCase().includes("sign in")) {
+                        setLimitModal(true);
+                        setTab("subscription");
+                    }
+                    else {
+                        setError(copyError || "The selected text could not be copied.");
+                    }
+                }
+                finally {
+                    shortcutCopyInProgress.current = false;
+                }
+            })();
+        };
+
+        document.addEventListener("copy", handleShortcutCopy, true);
+        return () => document.removeEventListener("copy", handleShortcutCopy, true);
+    }, [tab, generated, liveEpoch]);
     // Admin UI state is deliberately not restored from browser storage after refresh.
     // The Worker must independently validate the completed MFA session.
     useEffect(() => {
@@ -170,7 +251,6 @@ export default function App() {
             window.clearInterval(interval);
         };
     }, [selectedRegion.zone, regionCode]);
-    const liveEpoch = clock ? clock.epochMs + (performance.now() - clock.measuredAt) : null;
     // clockTick ensures a new render each second.
     void clockTick;
     async function selectTemplate(id: string) {
@@ -483,13 +563,13 @@ export default function App() {
 
       <label className="region-field">Support region<select value={regionCode} onChange={e => changeRegion(e.target.value)}>{REGIONS.map(r => <option key={r.code} value={r.code}>{r.name}</option>)}</select></label>
 
-      <div className="clock-strip"><div className="clock-icon"><Clock3 size={20}/></div><div><small>CURRENT TIME · {selectedRegion.zone}</small><strong>{timeLoading ? "Retrieving online time…" : liveEpoch === null ? "Online time unavailable" : formatTime(liveEpoch, selectedRegion.zone)}</strong></div><span className="time-source">{"ONLINE TIME"}</span><button className="quiet clock-copy" type="button" disabled={timeLoading || liveEpoch === null} onClick={() => void copyTime()}>{timeCopyState ? <CheckCircle2 size={15}/> : <Copy size={15}/>} {timeCopyState ? "Copied" : "Copy time"}</button></div>
+      <div className="clock-strip"><div className="clock-icon"><Clock3 size={20}/></div><div><small>CURRENT TIME · {selectedRegion.zone}</small><strong data-copy-source="time">{timeLoading ? "Retrieving online time…" : liveEpoch === null ? "Online time unavailable" : formatTime(liveEpoch, selectedRegion.zone)}</strong></div><span className="time-source">{"ONLINE TIME"}</span><button className="quiet clock-copy" type="button" disabled={timeLoading || liveEpoch === null} onClick={() => void copyTime()}>{timeCopyState ? <CheckCircle2 size={15}/> : <Copy size={15}/>} {timeCopyState ? "Copied" : "Copy time"}</button></div>
 
       <label className="region-field">Saved spiel<select value={selectedId} disabled={timeLoading || !clock} onChange={e => void selectTemplate(e.target.value)}><option value="">Choose a spiel…</option>{templates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
 
       <label className="output-label">Generated spiel <span>READ ONLY</span></label>
 
-      <textarea className="output" value={spielLoading ? "Generating spiel…" : generated} readOnly placeholder="Select a region, wait for its online time, then choose a spiel."/>
+      <textarea className="output" data-copy-source="spiel" value={spielLoading ? "Generating spiel…" : generated} readOnly placeholder="Select a region, wait for its online time, then choose a spiel."/>
 
       <div className="output-actions"><span className="helper">The spiel uses the online time when selected. Choose it again to refresh the inserted time.</span><button className="primary" disabled={!generated || spielLoading} onClick={() => void copySpiel()}>{copyState ? <CheckCircle2 size={17}/> : <Copy size={17}/>} {copyState ? "Copied" : "Copy spiel"}</button></div>
 
@@ -513,7 +593,7 @@ export default function App() {
 
     </main>}
 
-    {limitModal && <div className="limit-modal-backdrop" role="presentation"><section className="limit-modal" role="dialog" aria-modal="true" aria-labelledby="limit-modal-title"><div className="secure-icon"><LockKeyhole size={24}/></div><h3 id="limit-modal-title">Your free copy limit has been reached</h3><p>{signedIn ? `You have used your ${freeLimit} free copies for this month.` : "Sign in or create an account to use the free copies."}</p><div className="form-actions"><button className="quiet" onClick={() => setLimitModal(false)}>Close</button><button className="primary" onClick={() => { setLimitModal(false); setTab("subscription"); }}> {signedIn ? "View Premium" : "Sign in / Register"}</button></div></section></div>}
+    {limitModal && <div className="limit-modal-backdrop" role="presentation"><section className="limit-modal" role="dialog" aria-modal="true" aria-labelledby="limit-modal-title"><div className="secure-icon"><LockKeyhole size={24}/></div><h3 id="limit-modal-title">Your free copy limit has been reached</h3><p>{signedIn ? `You have used your ${freeLimit} free copies for this month.` : "Sign in or create an account to track your free copies and continue."} Subscribe for ₱49 to unlock Premium access for 60 days.</p><div className="form-actions"><button className="quiet" onClick={() => setLimitModal(false)}>Close</button><button className="primary" onClick={() => { setLimitModal(false); setTab("subscription"); }}> {signedIn ? "View Premium" : "Sign in / Register"}</button></div></section></div>}
     {/* <footer><p><strong>Time placeholder:</strong> {"{{TIME}}"} · Online time is retrieved independently for the selected region.</p></footer> */}
 
   </div>;
