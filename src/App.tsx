@@ -200,7 +200,7 @@ export default function App() {
     // elapsed time between online synchronizations; the computer clock is never used.
     useEffect(() => {
         const timer = window.setInterval(() => {
-            setClockTick(x => x + 1);
+            setClockTick((x: number) => x + 1);
         }, 1000);
         return () => {
             window.clearInterval(timer);
@@ -593,7 +593,7 @@ export default function App() {
 
     </main>}
 
-    {limitModal && <div className="limit-modal-backdrop" role="presentation"><section className="limit-modal" role="dialog" aria-modal="true" aria-labelledby="limit-modal-title"><div className="secure-icon"><LockKeyhole size={24}/></div><h3 id="limit-modal-title">Your free copy limit has been reached</h3><p>{signedIn ? `You have used your ${freeLimit} free copies for this month.` : "Sign in or create an account to track your free copies and continue."} Subscribe for ₱49 to unlock Premium access for 60 days.</p><div className="form-actions"><button className="quiet" onClick={() => setLimitModal(false)}>Close</button><button className="primary" onClick={() => { setLimitModal(false); setTab("subscription"); }}> {signedIn ? "View Premium" : "Sign in / Register"}</button></div></section></div>}
+    {limitModal && <div className="limit-modal-backdrop" role="presentation"><section className="limit-modal" role="dialog" aria-modal="true" aria-labelledby="limit-modal-title"><div className="secure-icon"><LockKeyhole size={24}/></div><h3 id="limit-modal-title">Your free copy limit has been reached</h3><p>{signedIn ? `You have used your ${freeLimit} free copies for this month.` : "Sign in or create an account to continue using the application."}</p><div className="form-actions"><button className="quiet" onClick={() => setLimitModal(false)}>Close</button><button className="primary" onClick={() => { setLimitModal(false); setTab("subscription"); }}> {signedIn ? "View Premium" : "Sign in / Register"}</button></div></section></div>}
     {/* <footer><p><strong>Time placeholder:</strong> {"{{TIME}}"} · Online time is retrieved independently for the selected region.</p></footer> */}
 
   </div>;
